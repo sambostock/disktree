@@ -68,7 +68,7 @@ impl Marks {
                 Some(node) => resolved.push(Target {
                     bytes: node.value(metric),
                     is_dir: node.is_dir(),
-                    hidden: is_hidden(&item.path),
+                    hidden: node.hidden() || is_hidden(&item.path),
                     path: item.path.clone(),
                 }),
                 None => resolved.push(Target {

@@ -130,7 +130,7 @@ See [On Windows](#on-windows) for what differs there.
 disktree            # scan the home directory
 disktree --disk     # the whole disk it lives on
 disktree ~/src      # or any directory
-disktree --help     # options: apparent size, follow links, skip hidden, …
+disktree --help     # options: apparent size, follow links, hide hidden, …
 ```
 
 ### The screen
@@ -162,6 +162,19 @@ what can be had back.
 The kinds come from directory names and a few shapes (a bare git repository,
 `target` beside a `Cargo.toml`). Some of the names are specific to one
 machine; see `crates/disktree-core/src/classify.rs`.
+
+### Hidden files
+
+**Hidden files** (`i`) filters the retained scan without scanning again.
+Scans always include hidden entries, even when started with `-H` /
+`--no-hidden`; that option only sets their initial visibility. Hiding entries
+updates the visible totals and treemap, and showing them restores the last
+scan's results. Press `r` to refresh changes on disk.
+
+Hidden directories disappear with their contents. Marks remain in the review
+list when hidden, and marking a visible directory includes its hidden contents:
+the visibility filter does not change what deleting a directory removes.
+
 
 ### Marking
 
@@ -221,7 +234,7 @@ and shows how much free space was actually gained.
 | `c` | review the marked list |
 | `t` | size, files or age: what areas and colours say |
 | `d` | disk usage or apparent size |
-| `i` | include or skip hidden entries |
+| `i` | show or hide hidden entries |
 | `r` | scan again |
 | `esc` while scanning | stop the scan |
 | `v` | scan another mounted volume |
@@ -343,7 +356,7 @@ The same program, with Windows' answers to the questions above:
   inside a profile can still be removed, as under your own. Names compare
   without regard to case, as Windows compares them.
 - **Hidden** means a name starting with a dot, or the hidden attribute, so
-  `-H` drops `AppData` as Explorer hides it.
+  `-H` hides `AppData` as Explorer hides it, but still scans its contents.
 - **The theme** follows Windows' light or dark setting, since there is no
   Omarchy theme to follow. It does on macOS too, and on GNOME and KDE.
 

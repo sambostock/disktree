@@ -93,6 +93,76 @@ fn read<R>(
 }
 
 #[gpui_kit::test]
+fn hidden_toggle_retains_snapshot_navigation_and_marks(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    update(&view, cx, |app, cx| {
+        let crumbs = app
+            .crumbs_for_path(&temp.path().join(".cache"))
+            .expect("hidden directory");
+        app.toggle_mark(&crumbs, cx);
+        app.go_to(crumbs, cx);
+    });
+    std::fs::remove_file(temp.path().join(".cache/blob.bin"))
+        .expect("change disk after scan");
+    press(cx, "i");
+    read(&view, cx, |app| {
+        assert!(app.scan.is_none());
+        assert_eq!(app.current_path(), temp.path());
+        assert_eq!(app.tree().unwrap().bytes, 301_000);
+        assert_eq!(app.marks.items()[0].bytes, 300_000);
+        assert!(app.tree().unwrap().child_named(".cache").is_none());
+    });
+    press(cx, "i");
+    read(&view, cx, |app| {
+        assert!(app.scan.is_none());
+        assert_eq!(app.tree().unwrap().bytes, 601_000);
+        assert_eq!(app.marks.items()[0].bytes, 300_000);
+        assert_eq!(
+            app.tree().unwrap().child_named(".cache").unwrap().bytes,
+            300_000
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn initially_hidden_entries_are_scanned_and_parent_marks_include_them(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    std::fs::write(temp.path().join("keep/.secret"), b"secret")
+        .expect("hidden child");
+    let root = temp.path().to_path_buf();
+    let mut initial = options();
+    initial.include_hidden = false;
+    let (view, cx) =
+        cx.add_window_view(move |_, cx| Disktree::new(root, initial, 3, cx));
+    finish_scan(&view, cx);
+    draw(cx);
+    update(&view, cx, |app, cx| {
+        assert_eq!(app.tree().unwrap().bytes, 301_000);
+        let crumbs = app
+            .crumbs_for_path(&temp.path().join("keep"))
+            .expect("visible parent");
+        app.toggle_mark(&crumbs, cx);
+        assert_eq!(app.marks.items()[0].bytes, 1_006);
+    });
+    std::fs::remove_file(temp.path().join(".cache/blob.bin"))
+        .expect("change disk after scan");
+    update(&view, cx, Disktree::toggle_hidden);
+    draw(cx);
+    read(&view, cx, |app| {
+        assert!(app.scan.is_none());
+        assert_eq!(app.tree().unwrap().bytes, 601_006);
+    });
+}
+
+#[gpui_kit::test]
 fn the_window_draws_a_treemap_with_tiles(cx: &mut TestAppContext) {
     cx.update(gpui_omarchy::init);
     let temp = fixture();

@@ -1095,6 +1095,11 @@ impl Table<'_> {
             children
         };
         let mut node = Node::directory(name);
+        node.set_hidden(
+            self.infos.get(number as usize).is_some_and(|info| {
+                info.attributes & FILE_ATTRIBUTE_HIDDEN != 0
+            }),
+        );
         node.children = children;
         Ok(node)
     }
@@ -1144,6 +1149,7 @@ impl Table<'_> {
             NodeKind::File
         };
         let mut node = Node::entry(name, kind, size);
+        node.set_hidden(info.attributes & FILE_ATTRIBUTE_HIDDEN != 0);
         node.modified = info.modified;
         if info.names > 1 {
             node.inode = NonZeroU64::new(u64::from(entry.child))
