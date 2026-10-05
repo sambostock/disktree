@@ -337,6 +337,8 @@ pub struct Disktree {
     pub power_hover: bool,
     pub cpu_threads: usize,
     pub tree: Option<Arc<Node>>,
+    /// Complete scan, shared with `tree` while hidden entries are shown.
+    full_tree: Option<Arc<Node>>,
     pub scan: Option<ScanHandle>,
     pub scan_epoch: u64,
     pub progress: ScanSnapshot,
@@ -477,6 +479,7 @@ impl Disktree {
             power_hover: false,
             cpu_threads: crate::power::cpu_threads(),
             tree: None,
+            full_tree: None,
             scan: None,
             scan_epoch: 0,
             progress: ScanSnapshot::default(),
@@ -587,7 +590,8 @@ impl Disktree {
         }
         app.scan_epoch += 1;
         app.marks.refresh(&app.root_path, &tree, app.options.metric);
-        app.tree = Some(Arc::new(tree));
+        app.full_tree = Some(Arc::new(tree));
+        app.rebuild_visible_tree();
         app.cache = None;
         app.refresh_insights();
         app.select_largest(cx);
@@ -615,7 +619,7 @@ impl Disktree {
     /// where it is reached, so only what is new at the wider level is read,
     /// and the current view stays on screen until the wider tree lands.
     pub fn widen_to(&mut self, above: PathBuf, cx: &mut Context<'_, Self>) {
-        let Some(tree) = self.tree.clone() else {
+        let Some(tree) = self.full_tree.clone() else {
             self.set_root(above, cx);
             return;
         };
@@ -639,7 +643,7 @@ impl Disktree {
         };
         self.scan = Some(ScanHandle::spawn_with(
             above,
-            self.options.clone(),
+            self.scan_options(),
             Some(known),
         ));
         Self::poll_scan(epoch, cx);
@@ -929,6 +933,7 @@ impl Disktree {
             self.remember();
         }
         discard(self.tree.take());
+        discard(self.full_tree.take());
         self.crumbs.clear();
         self.selected = None;
         self.hovered = None;
@@ -942,7 +947,7 @@ impl Disktree {
         self.scan_root.clone_from(&self.root_path);
         self.scan = Some(ScanHandle::spawn(
             self.root_path.clone(),
-            self.options.clone(),
+            self.scan_options(),
         ));
         Self::poll_scan(epoch, cx);
         cx.notify();
@@ -999,7 +1004,8 @@ impl Disktree {
                 }
                 let metric = self.options.metric;
                 self.marks.refresh(&self.root_path, &node, metric);
-                discard(self.tree.replace(Arc::new(node)));
+                discard(self.full_tree.replace(Arc::new(node)));
+                self.rebuild_visible_tree();
                 self.cache = None;
                 self.refresh_insights();
                 self.scan_elapsed =
@@ -1744,10 +1750,14 @@ impl Disktree {
     }
 
     pub fn target_at(&self, crumbs: &[usize]) -> Option<Target> {
-        let node = self.node_at(crumbs)?;
         let path = self.path_at(crumbs)?;
+        let node = crate::marks::find(
+            &self.root_path,
+            self.full_tree.as_deref()?,
+            &path,
+        )?;
         Some(Target {
-            hidden: is_hidden(&path),
+            hidden: node.hidden() || is_hidden(&path),
             path,
             bytes: node.value(self.options.metric),
             is_dir: node.is_dir(),
@@ -1837,7 +1847,7 @@ impl Disktree {
                 age_bucket,
                 reclaimable: node.is_some_and(|n| n.reclaim.is_some()),
                 filtered,
-                unreadable: node.is_some_and(|n| n.read_error),
+                unreadable: node.is_some_and(Node::read_error),
                 marked: is_marked,
                 covered: is_covered,
                 hovered: hovered.as_deref() == Some(crumbs),
@@ -2054,23 +2064,72 @@ impl Disktree {
         cx.notify();
     }
 
+    /// Visibility never changes what a scan visits or what marks can remove.
+    fn scan_options(&self) -> ScanOptions {
+        ScanOptions {
+            include_hidden: true,
+            ..self.options.clone()
+        }
+    }
+
+    fn rebuild_visible_tree(&mut self) {
+        let tree = self.full_tree.as_ref().map(|full| {
+            if self.options.include_hidden {
+                Arc::clone(full)
+            } else {
+                Arc::new(disktree_core::tree::without_hidden(
+                    full,
+                    self.options.metric,
+                    self.options.dedup_hardlinks,
+                ))
+            }
+        });
+        discard(std::mem::replace(&mut self.tree, tree));
+    }
+
+    pub fn toggle_hidden(&mut self, cx: &mut Context<'_, Self>) {
+        let mut directory = self.current_path();
+        let selected = self.selected.as_deref().and_then(|c| self.path_at(c));
+        self.options.include_hidden = !self.options.include_hidden;
+        self.rebuild_visible_tree();
+        // A hidden current directory falls back to its nearest visible parent.
+        while self.crumbs_for_path(&directory).is_none()
+            && directory != self.root_path
+        {
+            if !directory.pop() {
+                break;
+            }
+        }
+        self.crumbs = self.crumbs_for_path(&directory).unwrap_or_default();
+        self.selected = selected.and_then(|path| self.crumbs_for_path(&path));
+        self.forget_hover();
+        self.crumb_menu = None;
+        self.transition = None;
+        self.view = View::default();
+        self.refresh_insights();
+        self.clear_filter();
+        self.cache = None;
+        cx.notify();
+    }
+
     pub fn toggle_metric(&mut self, cx: &mut Context<'_, Self>) {
         // Children are ordered by the metric, so every crumb moves. Keep the
         // paths and find them again in the reordered tree.
         let directory = self.current_path();
         let selected = self.selected.as_deref().and_then(|c| self.path_at(c));
         self.options.metric = self.options.metric.toggled();
-        if let Some(tree) = &self.tree {
+        if let Some(tree) = &self.full_tree {
             let mut tree = (**tree).clone();
             disktree_core::tree::aggregate(&mut tree, self.options.metric);
-            discard(self.tree.replace(Arc::new(tree)));
+            discard(self.full_tree.replace(Arc::new(tree)));
             let metric = self.options.metric;
             self.marks.refresh(
                 &self.root_path,
-                self.tree.as_ref().unwrap(),
+                self.full_tree.as_ref().unwrap(),
                 metric,
             );
         }
+        self.rebuild_visible_tree();
         self.crumbs = self.crumbs_for_path(&directory).unwrap_or_default();
         self.selected = selected.and_then(|path| self.crumbs_for_path(&path));
         self.forget_hover();
@@ -2730,10 +2789,7 @@ impl Disktree {
             "r" if !control => self.start_scan(cx),
             "g" if !control => self.go_to_disk(cx),
             "v" if !control && !shift => self.open_volumes(cx),
-            "i" if !control => {
-                self.options.include_hidden = !self.options.include_hidden;
-                self.start_scan(cx);
-            }
+            "i" if !control => self.toggle_hidden(cx),
             "d" if !control => {
                 self.options.apparent_size = !self.options.apparent_size;
                 self.start_scan(cx);

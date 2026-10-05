@@ -835,8 +835,7 @@ fn view_settings(
         .tab_stop(false)
         .on_change(move |_, _, window, cx| {
             let _ = entity.update(cx, |this, cx| {
-                this.options.include_hidden = !this.options.include_hidden;
-                this.start_scan(cx);
+                this.toggle_hidden(cx);
             });
             window.focus(&focus, cx);
         })
@@ -1514,7 +1513,7 @@ fn selection_section(
             cx,
         ));
     }
-    if node.read_error {
+    if node.read_error() {
         chips.push(widgets::chip("Partly unreadable", theme.warning, cx));
     }
     let badges = (!chips.is_empty()).then(|| {

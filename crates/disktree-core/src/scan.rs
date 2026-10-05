@@ -767,6 +767,7 @@ struct PendingDir {
     partial: Mutex<Partial>,
     read_error: AtomicBool,
     depth: usize,
+    hidden: bool,
 }
 
 /// What a directory's node is made of before it is built: the name the
@@ -795,6 +796,7 @@ impl PendingDir {
             }),
             read_error: AtomicBool::new(false),
             depth,
+            hidden: false,
         }
     }
 
@@ -806,19 +808,13 @@ impl PendingDir {
     /// once every child is present.
     fn build(&self) -> Node {
         let partial = std::mem::take(&mut *lock(&self.partial));
-        Node {
-            name: partial.name,
-            kind: NodeKind::Directory,
-            bytes: 0,
-            files: 0,
-            dirs: 1,
-            inode: None,
-            read_error: self.read_error.load(Ordering::Relaxed),
-            modified: 0,
-            category: crate::classify::Category::Other,
-            reclaim: None,
-            children: partial.children,
+        let mut node = Node::directory(partial.name);
+        node.children = partial.children;
+        node.set_hidden(self.hidden);
+        if self.read_error.load(Ordering::Relaxed) {
+            node.set_read_error();
         }
+        node
     }
 }
 
@@ -1084,17 +1080,21 @@ fn walk(dir: &Arc<PendingDir>, context: &WalkContext) -> Vec<Arc<PendingDir>> {
                 }
                 match entry {
                     Ok(mut entry) => {
+                        let hidden = entry.hidden();
                         match context.classify(&dir.path, &mut entry) {
                             Classified::Subdirectory { path, name } => {
                                 tally.dirs += 1;
-                                subdirs.push(Arc::new(PendingDir::new(
+                                let mut pending = PendingDir::new(
                                     path,
                                     name,
                                     Some(Arc::clone(dir)),
                                     dir.depth + 1,
-                                )));
+                                );
+                                pending.hidden = hidden;
+                                subdirs.push(Arc::new(pending));
                             }
-                            Classified::Entry(node) => {
+                            Classified::Entry(mut node) => {
+                                node.set_hidden(hidden);
                                 tally.add(&node);
                                 leaves.push(node);
                             }
@@ -1740,7 +1740,7 @@ mod tests {
         assert_eq!(tree.bytes, 11);
         let node = child(&tree, "locked");
         if matches!(readable, Ok(false)) {
-            assert!(node.read_error);
+            assert!(node.read_error());
             assert!(progress.snapshot().errors >= 1);
             assert!(!progress.snapshot().messages.is_empty());
         }

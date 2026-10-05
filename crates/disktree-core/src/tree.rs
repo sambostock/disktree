@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::classify::{Category, Reclaim};
 
@@ -75,8 +75,8 @@ pub struct Node {
     /// `(device, inode)` for files, used to de-duplicate hardlinks. No file
     /// has inode zero, which lets `None` cost nothing.
     pub inode: Option<(u64, NonZeroU64)>,
-    /// The directory could not be read; its contents are unknown.
-    pub read_error: bool,
+    // Pack unreadable and platform-hidden bits to keep each node at 88 bytes.
+    flags: u8,
     /// Newest write time at or beneath this node, in Unix seconds; `0` when
     /// unknown. Derived for directories by [`aggregate`].
     pub modified: i64,
@@ -90,6 +90,24 @@ pub struct Node {
 }
 
 impl Node {
+    /// The directory's contents could not be read.
+    pub const fn read_error(&self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    pub const fn set_read_error(&mut self) {
+        self.flags |= 1;
+    }
+
+    /// Hidden by a platform attribute; dot names are checked separately.
+    pub const fn hidden(&self) -> bool {
+        self.flags & 2 != 0
+    }
+
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.flags = (self.flags & !2) | (u8::from(hidden) << 1);
+    }
+
     /// A directory with no children yet.
     #[allow(
         clippy::missing_const_for_fn,
@@ -103,7 +121,7 @@ impl Node {
             files: 0,
             dirs: 1,
             inode: None,
-            read_error: false,
+            flags: 0,
             modified: 0,
             category: Category::Other,
             reclaim: None,
@@ -124,7 +142,7 @@ impl Node {
             files: u64::from(kind == NodeKind::File),
             dirs: 0,
             inode: None,
-            read_error: false,
+            flags: 0,
             modified: 0,
             category: Category::Other,
             reclaim: None,
@@ -273,6 +291,64 @@ pub fn aggregate(node: &mut Node, metric: Metric) {
 /// can split it differently between folders; the totals are the same.
 pub(crate) fn aggregate_deduped(node: &mut Node, metric: Metric, seen: &Seen) {
     aggregate_at(node, metric, 0, Some(seen));
+}
+
+/// A visible snapshot without hidden children, retaining an explicitly
+/// selected hidden root. The source remains complete for marks and rescans.
+pub fn without_hidden(
+    root: &Node,
+    metric: Metric,
+    dedup_hardlinks: bool,
+) -> Node {
+    // A duplicate's bytes were zeroed during aggregation. Recover its size
+    // from the charged name, even when that name is in a hidden subtree.
+    // Only hardlinks need this temporary storage, not every file on disk.
+    fn collect(node: &Node, sizes: &mut FxHashMap<(u64, u64), u64>) {
+        if let Some(key) = node.identity() {
+            let size = sizes.entry(key).or_default();
+            *size = (*size).max(node.bytes);
+        }
+        for child in &node.children {
+            collect(child, sizes);
+        }
+    }
+    fn copy(node: &Node, sizes: &FxHashMap<(u64, u64), u64>) -> Node {
+        let mut visible = Node {
+            name: node.name.clone(),
+            kind: node.kind,
+            bytes: node
+                .identity()
+                .and_then(|key| sizes.get(&key))
+                .copied()
+                .unwrap_or(node.bytes),
+            files: node.files,
+            dirs: node.dirs,
+            inode: node.inode,
+            flags: node.flags,
+            modified: node.modified,
+            category: node.category,
+            reclaim: node.reclaim,
+            children: Vec::new(),
+        };
+        visible.children = node
+            .children
+            .iter()
+            .filter(|child| !child.hidden() && !child.name.starts_with('.'))
+            .map(|child| copy(child, sizes))
+            .collect();
+        visible
+    }
+    let mut sizes = FxHashMap::default();
+    if dedup_hardlinks {
+        collect(root, &mut sizes);
+    }
+    let mut visible = copy(root, &sizes);
+    if dedup_hardlinks {
+        aggregate_deduped(&mut visible, metric, &Seen::new());
+    } else {
+        aggregate(&mut visible, metric);
+    }
+    visible
 }
 
 /// Identities a finish pass has met.
@@ -425,6 +501,47 @@ mod tests {
 
     fn leaf(name: &str, bytes: u64) -> Node {
         Node::entry(name, NodeKind::File, bytes)
+    }
+
+    #[test]
+    fn hidden_projection_excludes_subtrees_but_not_its_root() {
+        let mut root = Node::directory(".root");
+        let mut nested = Node::directory("visible");
+        nested.children = vec![leaf("keep", 5), leaf(".secret", 11)];
+        let mut hidden = Node::directory(".cache");
+        hidden.children.push(leaf("large", 100));
+        let mut attribute = Node::directory("AppData");
+        attribute.set_hidden(true);
+        attribute.children.push(leaf("data", 50));
+        root.children = vec![nested, hidden, attribute];
+        aggregate(&mut root, Metric::Bytes);
+        let visible = without_hidden(&root, Metric::Bytes, true);
+        assert_eq!((visible.bytes, visible.files, visible.dirs), (5, 1, 2));
+        assert_eq!(visible.children[0].name.as_ref(), "visible");
+        assert_eq!(visible.children[0].children[0].name.as_ref(), "keep");
+        assert_eq!((root.bytes, root.files), (166, 4));
+    }
+
+    #[test]
+    fn hidden_projection_recovers_a_visible_hardlinks_charge() {
+        let mut root = Node::directory("root");
+        let identity = Some((1, NonZeroU64::new(42).unwrap()));
+        let mut hidden = leaf(".charged", 17);
+        hidden.inode = identity;
+        let mut visible = leaf("visible", 17);
+        visible.inode = identity;
+        // Force the full snapshot's charged name to be the hidden one.
+        visible.bytes = 0;
+        root.children = vec![hidden, visible];
+        aggregate(&mut root, Metric::Bytes);
+        let projected = without_hidden(&root, Metric::Bytes, true);
+        assert_eq!((projected.bytes, projected.files), (17, 1));
+        assert_eq!(projected.children[0].bytes, 17);
+        assert_eq!(root.children[1].bytes, 0);
+
+        root.children.push(leaf("empty", 0));
+        let projected = without_hidden(&root, Metric::Files, true);
+        assert_eq!((projected.bytes, projected.files), (17, 2));
     }
 
     /// A home directory is tens of millions of nodes: every byte here is

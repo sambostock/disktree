@@ -61,7 +61,7 @@ selected tile, Enter opens it, c reviews the marked list, ? lists every key.
 options:
   -a, --apparent-size   measure apparent length instead of allocated blocks
   -l, --follow-links    follow symlinks
-  -H, --no-hidden       skip dotfiles and dot-directories
+  -H, --no-hidden       initially hide hidden entries (still scanned)
   -D, --disk            scan the whole disk the home directory is on
   -X, --cross-filesystems
                         also measure other disks, network shares and pseudo
