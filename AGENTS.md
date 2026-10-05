@@ -106,6 +106,12 @@ and `cargo build --release` directly; CI runs the gate on both systems.
    the tree, which `-X` and the media exception allow, is reported and never
    added to this volume's free space; see `space::attribution`. The final number
    comes from `statvfs` before and after.
+10. **Hidden visibility filters a retained scan.** Interactive scans include
+    hidden entries even with `--no-hidden`; the option sets initial visibility.
+    The displayed tree may omit hidden subtrees, but marks, removal accounting
+    and widening use the complete snapshot. Filtering must recover a visible
+    hardlink's size when its charged name is hidden, then de-duplicate visible
+    entries again. The core scan API still supports excluding hidden entries.
 
 ## Where changes belong
 

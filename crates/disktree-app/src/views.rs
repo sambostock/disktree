@@ -3529,7 +3529,7 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         (MODIFIER_OPEN, "Choose another directory to scan"),
         ("g", "The whole disk; click any directory above to widen"),
         ("d", "Disk usage or apparent size"),
-        ("i", "Include or skip hidden entries"),
+        ("i", "Show or hide hidden entries"),
         ("p", "Show or hide the selection line"),
         (
             "o",

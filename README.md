@@ -234,7 +234,7 @@ and shows how much free space was actually gained.
 | `c` | review the marked list |
 | `t` | size, files or age: what areas and colours say |
 | `d` | disk usage or apparent size |
-| `i` | show or hide hidden entries without rescanning |
+| `i` | show or hide hidden entries |
 | `r` | scan again |
 | `esc` while scanning | stop the scan |
 | `v` | scan another mounted volume |
